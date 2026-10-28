@@ -1443,6 +1443,7 @@ function drawHUD() {
     ctx.fillStyle = '#ffd34d'; ctx.fillRect(side ? x0 : x0 + SIDE - 4, 0, 4, H);
   }
   const lx = SIDE / 2, rx = W - SIDE / 2;
+  if (G.net) txt('PING ' + NET.rtt + ' MS', lx, H - 22, 9, NET.rtt < 120 ? '#7dff7d' : NET.rtt < 250 ? '#ffd34d' : '#ff5050', 'center');
   txt('TIEMPO', lx, 16, 9, '#9fb0ff', 'center');
   ctx.fillStyle = '#000'; rr(lx - 62, 30, 124, 50, 8); ctx.fill();
   const low = G.time < 30 * 60 && Math.floor(G.t / 15) % 2;
@@ -1656,7 +1657,7 @@ function frame(t) {
    envian sus teclas por WebSocket y reciben el estado. El servidor solo gestiona la sala y retransmite.
 ===================================================================== */
 const WS_URL = 'wss://bomberman-server.superbombardero.workers.dev/ws';   // tu Worker de Cloudflare
-const NET = {room:null, host:false, uid:null, slot:-1, meta:null, players:{}, slots:[], inputs:{}, gsubs:[], ws:null, pingT:null,
+const NET = {room:null, host:false, uid:null, slot:-1, meta:null, players:{}, slots:[], inputs:{}, gsubs:[], ws:null, pingT:null, pingAt:0, rtt:0,
   inGame:false, menuOpen:false, lp:null, bc:0, lastSent:null, sentT:0, snapTick:0, seq:0, lastSeq:-1, lastMap:'', mv:0, q:0, placeAt:0, evq:[], busy:false};
 const EVOK = new Set(['place', 'boom', 'item', 'die', 'kick', 'win', 'thud']);
 const DIRN = ['down', 'up', 'left', 'right'];
@@ -1688,7 +1689,7 @@ function wsConnect(code, create) {
       if (!done) {
         if (m.t === 'welcome') {
           done = true; clearTimeout(to); NET.ws = ws; NET.slot = m.slot | 0; NET.host = !!m.host;
-          NET.pingT = setInterval(() => wsSend({t:'ping'}), 15000);
+          NET.pingT = setInterval(() => { NET.pingAt = performance.now(); wsSend({t:'ping'}); }, 2000);
           resolve(m);
         } else if (m.t === 'err') fail(m.msg || 'ERROR');
         return;
@@ -1713,6 +1714,7 @@ function onWsMsg(m) {
     case 'in': if (NET.host && m.uid && m.d) NET.inputs[m.uid] = m.d; break;
     case 'state': if (G && G.net === 'client') applyState(m.d); break;
     case 'map': if (G && G.net === 'client') applyMap(m.d); break;
+    case 'pong': NET.rtt = Math.round(performance.now() - NET.pingAt); break;
     case 'err': rmMsg(m.msg || ''); break;
     case 'closed': if (!NET.host) { leaveRoom(); showPanel('m-online'); onMsg('LA SALA SE CERRO (EL ANFITRION SE FUE)'); } break;
   }
@@ -1884,7 +1886,7 @@ function remoteUpdate(p) {
 }
 function syncRemoteB() { for (const p of G.players) if (p.remote) { const r = NET.inputs[p.uid]; p.lastB = r ? r.b | 0 : 0; p.lastQ = r ? r.q : undefined; p.tx = p.x; p.ty = p.y; p.accT = G.t; } }
 function hostPublish() {
-  if (!G || G.net !== 'host' || ++NET.snapTick % 3) return;      // 20 envios por segundo
+  if (!G || G.net !== 'host' || ++NET.snapTick % 2) return;      // 30 envios por segundo
   if (!NET.ws || NET.ws.readyState !== 1 || NET.ws.bufferedAmount > 200000) return;
   const P = {};
   for (const p of G.players) P[p.i] = [Math.round(p.x), Math.round(p.y), Math.max(0, DIRN.indexOf(p.dir)), p.alive ? 1 : 0, p.ch, p.mv ? 1 : 0, Math.min(999, p.shield | 0),
