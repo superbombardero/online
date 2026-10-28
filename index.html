@@ -1050,13 +1050,16 @@ function updatePlayer(p) {
     if (G.mode !== 'battle' && p.lives > 0 && p.deadT > 110 && G.phase === 'play') { resetPlayer(p, false); p.invuln = 200; }
     return;
   }
-  const inp = p.bot ? botInput(p) : p.remote ? remoteInput(p) : readInput(p);
+  if (p.remote) remoteUpdate(p);
+  else {
+  const inp = p.bot ? botInput(p) : readInput(p);
   p.mv = false;
   if (inp.dx || inp.dy) {
     p.dir = inp.dx < 0 ? 'left' : inp.dx > 0 ? 'right' : inp.dy < 0 ? 'up' : 'down';
     movePlayer(p, inp.dx, inp.dy, p.sp); p.mv = true; p.anim++;
   }
   if (inp.bomb) placeBomb(p);
+  }
   if (p.invuln > 0) p.invuln--; if (p.shield > 0) p.shield--; if (p.placeT > 0) p.placeT--;
   const gx = Math.floor(p.x / TS), gy = Math.floor(p.y / TS);
   const it = G.items[gy][gx]; if (it) { G.items[gy][gx] = null; applyItem(p, it); }
@@ -1403,12 +1406,23 @@ function drawEnemy(e) {
     ctx.fillStyle = '#000'; ctx.fillRect(cx - 44, cy - 74, 88, 10); ctx.fillStyle = '#e33'; ctx.fillRect(cx - 42, cy - 72, 84 * e.hp / e.maxhp, 6);
   }
 }
+let terr = null, terrKey = '';
+function drawTerrain() {
+  let key = G.theme.name; for (let y = 0; y < ROWS; y++) key += G.grid[y].join('');
+  if (!terr) { terr = document.createElement('canvas'); terr.width = COLS * TS; terr.height = ROWS * TS; }
+  if (key !== terrKey) {
+    terrKey = key; const main = ctx; ctx = terr.getContext('2d'); ctx.clearRect(0, 0, terr.width, terr.height);
+    drawFloor();
+    for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) if (G.grid[y][x] === 1) drawHard(x, y);
+    for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) if (G.grid[y][x] === 2) drawSoft(x, y);
+    ctx = main;
+  }
+  ctx.drawImage(terr, 0, 0);
+}
 function drawWorld() {
-  drawFloor();
-  for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) if (G.grid[y][x] === 1) drawHard(x, y);
+  drawTerrain();
   drawExit();
   for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) if (G.items[y][x]) drawItem(x, y, G.items[y][x]);
-  for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) if (G.grid[y][x] === 2) drawSoft(x, y);
   for (const b of G.bombs) drawBomb(b);
   const ents = [];
   for (const p of G.players) ents.push({y:p.y, f:() => drawPlayer(p)});
@@ -1642,7 +1656,7 @@ function frame(t) {
    envian sus teclas (rooms/<sala>/in/<uid>) y reciben el estado (rooms/<sala>/state y /map).
 ===================================================================== */
 const NET = {room:null, host:false, uid:null, slot:-1, meta:null, players:{}, slots:{}, inputs:{}, subs:[], gsubs:[], od:[],
-  inGame:false, menuOpen:false, lp:null, bc:0, lastSent:null, sentT:0, snapTick:0, seq:0, lastSeq:-1, lastMap:'', mv:0, evq:[], busy:false};
+  inGame:false, menuOpen:false, lp:null, bc:0, lastSent:null, sentT:0, snapTick:0, seq:0, lastSeq:-1, lastMap:'', mv:0, q:0, placeAt:0, evq:[], busy:false};
 const EVOK = new Set(['place', 'boom', 'item', 'die', 'kick', 'win', 'thud']);
 const DIRN = ['down', 'up', 'left', 'right'];
 const ITC = {bomb:'b', fire:'f', speed:'s', kick:'k', vest:'v', life:'l'}, ITN = {b:'bomb', f:'fire', s:'speed', k:'kick', v:'vest', l:'life'};
@@ -1821,7 +1835,7 @@ function startOnlineHost() {
     const uid = NET.slots[i], pl = uid && NET.players[uid]; if (!pl) continue;
     let ch = pl.ch | 0; if (used.has(ch)) ch = [0, 1, 2, 3].find(c => !used.has(c)); used.add(ch);
     const mine = uid === NET.uid, p = makePlayer(i, mine ? ['kb1', 'kb2', 'pad0'] : [], false, 1);
-    p.ch = ch; p.uid = uid; p.name = String(pl.name || 'J' + (i + 1)); p.local = mine; p.remote = !mine; p.lastB = ((NET.inputs[uid] || {}).b) | 0;
+    p.ch = ch; p.uid = uid; p.name = String(pl.name || 'J' + (i + 1)); p.local = mine; p.remote = !mine; p.lastB = ((NET.inputs[uid] || {}).b) | 0; p.cs = 0; p.accT = 0; p.tx = 0; p.ty = 0; p.rmv = false;
     if (mine) NET.lp = p;
     ps.push(p);
   }
@@ -1835,17 +1849,42 @@ function startOnlineHost() {
   fbLog('game_start', {mode: 'battle_online'});
   startRound(); enterPlay();
 }
-function remoteInput(p) {
-  const r = NET.inputs[p.uid] || {}, b = r.b | 0, bomb = b > p.lastB; p.lastB = b;
-  let dx = Math.sign(r.dx | 0), dy = Math.sign(r.dy | 0); if (dx && dy) dy = 0;
-  return {dx, dy, bomb};
+function wallHit(nx, ny) {
+  const x0 = Math.floor((nx - HALF) / TS), x1 = Math.floor((nx + HALF - 1) / TS), y0 = Math.floor((ny - HALF) / TS), y1 = Math.floor((ny + HALF - 1) / TS);
+  for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) if (x < 0 || y < 0 || x >= COLS || y >= ROWS || G.grid[y][x] !== 0) return true;
+  return false;
 }
-function syncRemoteB() { for (const p of G.players) if (p.remote) { const r = NET.inputs[p.uid]; p.lastB = r ? r.b | 0 : 0; } }
+/* El jugador remoto mueve su propio personaje (sin retraso) y el anfitrion valida la posicion: velocidad maxima y paredes. */
+function remoteUpdate(p) {
+  const r = NET.inputs[p.uid];
+  if (r && r.q !== undefined && r.q !== p.lastQ) {
+    p.lastQ = r.q;
+    const nx = +r.x, ny = +r.y;
+    if (isFinite(nx) && isFinite(ny)) {
+      const lim = Math.min(40, G.t - p.accT + 3) * p.sp * 1.5 + 10;
+      if (Math.hypot(nx - p.tx, ny - p.ty) <= lim && !wallHit(nx, ny)) { p.tx = nx; p.ty = ny; p.accT = G.t; }
+      else p.cs = (p.cs + 1) & 255;          // rechazada: el cliente vuelve a la posicion del anfitrion
+    }
+    p.dir = DIRN[r.d | 0] || p.dir; p.rmv = !!r.m;
+  }
+  const dx = p.tx - p.x, dy = p.ty - p.y, d = Math.hypot(dx, dy);
+  if (d > 100) { p.x = p.tx; p.y = p.ty; } else { p.x += dx * .5; p.y += dy * .5; }
+  p.mv = p.rmv || d > 1.5; if (p.mv) p.anim++;
+  if (!r) return;
+  const bn = r.b | 0;
+  if (bn > p.lastB) { p.lastB = bn; p.x = p.tx; p.y = p.ty; placeBomb(p); }
+  const kx = Math.sign(r.dx | 0), ky = kx ? 0 : Math.sign(r.dy | 0);
+  if (p.kick && (kx || ky)) {
+    const gx = Math.floor(p.x / TS), gy = Math.floor(p.y / TS), b = bombAt(gx + kx, gy + ky);
+    if (b && !b.ignore.has(p) && !b.vx && !b.vy && Math.abs(p.x - (gx + .5) * TS) <= 9 && Math.abs(p.y - (gy + .5) * TS) <= 9) kickBomb(b, kx, ky);
+  }
+}
+function syncRemoteB() { for (const p of G.players) if (p.remote) { const r = NET.inputs[p.uid]; p.lastB = r ? r.b | 0 : 0; p.lastQ = r ? r.q : undefined; p.tx = p.x; p.ty = p.y; p.accT = G.t; } }
 function hostPublish() {
   if (!G || G.net !== 'host' || ++NET.snapTick % 3) return;      // 20 envios por segundo
   const D = FBD(), P = {};
   for (const p of G.players) P[p.i] = [Math.round(p.x), Math.round(p.y), Math.max(0, DIRN.indexOf(p.dir)), p.alive ? 1 : 0, p.ch, p.mv ? 1 : 0, Math.min(999, p.shield | 0),
-    Math.min(9999, p.invuln | 0), p.bombs, p.range, p.lvl, p.kick ? 1 : 0, p.wins, p.placeT > 0 ? p.placeT : 0].join(',');
+    Math.min(9999, p.invuln | 0), p.bombs, p.range, p.lvl, p.kick ? 1 : 0, p.wins, p.placeT > 0 ? p.placeT : 0, p.cs | 0, p.active | 0].join(',');
   const bs = G.bombs.map(b => [b.gx, b.gy, b.ox, b.oy, b.vx, b.vy, b.off, b.timer].join(',')).join(';');
   const fs = G.flames.map(f => [f.x, f.y, f.t, f.kind].join(',')).join(';');
   const st = {s:++NET.seq, ph:G.phase, pt:G.phaseT, tx:G.introText || '', sb:G.introSub || null, ct:G.clearText || null, tm:G.time, rd:G.round, tg:G.target, sd:G.sdMsg, gt:G.goT, th:G.themeKey || 'grass',
@@ -1922,6 +1961,8 @@ function applyState(st) {
     if (p.first || (!was && p.alive)) { p.x = p.tx; p.y = p.ty; p.first = false; }
     p.ch = v[4]; p.srvMv = !!v[5]; p.shield = v[6]; p.invuln = v[7]; p.bombs = v[8]; p.range = v[9]; p.lvl = v[10]; p.sp = 2.2 + p.lvl * .4; p.wins = v[12];
     if (v[13] > p.placeT) p.placeT = v[13];
+    p.active = v[15] | 0;
+    const cs = v[14] | 0; if (p.csv === undefined) p.csv = cs; else if (cs !== p.csv) { p.csv = cs; if (p === NET.lp) { p.x = p.tx; p.y = p.ty; } }
     if (p !== NET.lp) p.dir = DIRN[v[2]] || 'down';
   }
   const old = G.bombs; G.bombs = [];
@@ -1931,42 +1972,50 @@ function applyState(st) {
     if (prev) nb.ignore = prev.ignore; else if (NET.lp && NET.lp.alive && overlapsTile(NET.lp, nb.ox, nb.oy)) nb.ignore.add(NET.lp);
     G.bombs.push(nb);
   }
+  for (const o of old) if (o.pend !== undefined && G.t - o.pend < 40 && !G.bombs.some(b => b.ox === o.ox && b.oy === o.oy)) G.bombs.push(o);
   G.flames = [];
   if (st.f) for (const s of String(st.f).split(';')) { const a = s.split(','); G.flames.push({x:+a[0], y:+a[1], t:+a[2], kind:a[3], o:-1}); }
-  if (st.ev) for (const e of String(st.ev).split(',')) sfx(e);
+  if (st.ev) for (const e of String(st.ev).split(',')) { if (e === 'place' && performance.now() - NET.placeAt < 600) continue; sfx(e); }
 }
 function clientUpdate() {
   G.t++; updateFx();
   for (const b of G.bombs) { b.timer--; for (const q of Array.from(b.ignore)) if (!q.alive || !overlapsTile(q, b.ox, b.oy)) b.ignore.delete(q); }
   if (G.sdMsg > 0) G.sdMsg--; if (G.goT > 0) G.goT--;
   const lp = NET.lp, inp = lp ? readInput(lp) : {dx:0, dy:0, bomb:false};
-  if (lp) sendInput(inp);
   for (const p of G.players) {
     if (p.placeT > 0) p.placeT--;
     if (!p.alive) { p.deadT++; p.mv = false; continue; }
     const ex = p.tx - p.x, ey = p.ty - p.y, d = Math.hypot(ex, ey);
-    if (p === lp) {                      // prediccion local: se mueve al instante y se corrige con el estado del anfitrion
+    if (p === lp) {                      // mi personaje se mueve al instante (el anfitrion solo valida)
       p.mv = false;
-      if (G.phase === 'play' && (inp.dx || inp.dy)) {
+      if (G.phase !== 'play') { p.x = p.tx; p.y = p.ty; }
+      else if (inp.dx || inp.dy) {
         p.dir = inp.dx < 0 ? 'left' : inp.dx > 0 ? 'right' : inp.dy < 0 ? 'up' : 'down';
         movePlayer(p, inp.dx, inp.dy, p.sp); p.mv = true; p.anim++;
-        if (Math.hypot(p.tx - p.x, p.ty - p.y) > 64) { p.x = p.tx; p.y = p.ty; }
-      } else if (d > 48 || G.phase !== 'play') { p.x = p.tx; p.y = p.ty; }
-      else { p.x += ex * .25; p.y += ey * .25; }
+      }
     } else {
       if (d > 96) { p.x = p.tx; p.y = p.ty; } else { p.x += ex * .35; p.y += ey * .35; }
       p.mv = p.srvMv || d > 1.5; if (p.mv) p.anim++;
     }
   }
+  if (lp && lp.alive && G.phase === 'play' && inp.bomb) localBomb(lp);
+  if (lp) sendInput(inp, lp);
   keyP_clear();
 }
-function sendInput(inp) {
-  if (G.phase !== 'play' || NET.menuOpen) inp = {dx:0, dy:0, bomb:false};
-  if (inp.bomb) NET.bc++;
-  const cur = inp.dx + ',' + inp.dy + ',' + NET.bc, now = performance.now();
-  if (cur !== NET.lastSent && (inp.bomb || now - NET.sentT >= 40)) {
+function localBomb(p) {            // bomba "optimista": aparece al instante y el anfitrion la confirma
+  const gx = Math.floor(p.x / TS), gy = Math.floor(p.y / TS);
+  if (p.active + G.bombs.filter(b => b.pend !== undefined).length >= p.bombs || G.grid[gy][gx] !== 0 || bombAt(gx, gy)) return;
+  G.bombs.push({gx, gy, ox:gx, oy:gy, vx:0, vy:0, off:0, timer:FUSE, ignore:new Set([p]), dead:false, pend:G.t});
+  p.placeT = 16; NET.placeAt = performance.now(); sfx('place');
+}
+function sendInput(inp, lp) {
+  const play = G.phase === 'play' && !NET.menuOpen, dx = play ? inp.dx : 0, dy = play ? inp.dy : 0;
+  if (play && inp.bomb) NET.bc++;
+  const x = Math.round(lp.x), y = Math.round(lp.y), d = Math.max(0, DIRN.indexOf(lp.dir)), m = lp.mv ? 1 : 0;
+  const cur = [dx, dy, NET.bc, x, y, d, m].join(','), now = performance.now();
+  if (cur !== NET.lastSent && ((play && inp.bomb) || now - NET.sentT >= 33)) {
     NET.lastSent = cur; NET.sentT = now;
-    FBD().set(roomRef('in/' + NET.uid), {dx:inp.dx, dy:inp.dy, b:NET.bc}).catch(e => console.warn(e));
+    FBD().set(roomRef('in/' + NET.uid), {dx, dy, b:NET.bc, x, y, d, m, q:++NET.q}).catch(e => console.warn(e));
   }
 }
 
