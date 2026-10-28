@@ -62,6 +62,10 @@ button.listen{background:#d4281e;border-color:#fff;animation:bl .6s steps(2) inf
 @media (pointer:coarse){#touch.on{display:block}}
 #rotate{display:none;position:fixed;inset:0;z-index:50;background:#0b0b18;align-items:center;justify-content:center;text-align:center;font-size:4.5vmin;line-height:1.9;padding:8vmin;color:#ffd34d}
 @media (orientation:portrait) and (pointer:coarse){#rotate{display:flex}}
+.rpv{background:transparent;height:auto;image-rendering:auto;width:100%}
+#rmSlots .ccard .sm{font-size:.7em;color:#9fb0ff;min-height:1.2em}
+#rmSlots .rpv{height:13em;width:auto;align-self:center}
+#rmSlots .ccard{padding:.4em;gap:.3em}
 </style>
 </head>
 <body>
@@ -85,7 +89,8 @@ button.listen{background:#d4281e;border-color:#fff;animation:bl .6s steps(2) inf
     <div class="row" style="align-items:center"><p class="sub" id="userInfo" style="flex:1;text-align:left"></p><button id="btnLogout" style="flex:0 0 auto;font-size:.8em;padding:.6em .8em">CERRAR SESION</button></div>
     <button data-go="story1" class="go">MODO HISTORIA · 1 JUGADOR</button>
     <button data-go="story2">HISTORIA COOPERATIVA · 2 JUGADORES</button>
-    <button data-go="battle">BATALLA (hasta 4 jugadores / bots)</button>
+    <button data-go="online" class="go">BATALLA ONLINE · HASTA 4 JUGADORES</button>
+    <button data-go="battle">BATALLA LOCAL (jugadores / bots)</button>
     <button data-go="chars">ELEGIR PERSONAJES</button>
     <button data-go="controls">CONFIGURAR CONTROLES (PC)</button>
     <button data-go="help">AYUDA</button>
@@ -100,6 +105,29 @@ button.listen{background:#d4281e;border-color:#fff;animation:bl .6s steps(2) inf
     <div class="row"><button id="btnSudden"></button><button id="btnItems"></button></div>
     <button id="btnStart" class="go">¡A COMBATIR!</button>
     <div class="row"><button data-go="chars">PERSONAJES</button><button data-go="controls">CONTROLES</button><button data-go="main">VOLVER</button></div>
+   </div>
+   <div class="panel hidden" id="m-online">
+    <h2>BATALLA ONLINE</h2>
+    <p class="sub" id="onInfo">Juega con hasta 4 jugadores conectados. Crea una sala y comparte el codigo, o escribe el codigo de un amigo.</p>
+    <button id="btnCreate" class="go">CREAR SALA</button>
+    <label class="fld">CODIGO DE SALA<input id="onCode" maxlength="4" autocomplete="off" spellcheck="false" autocapitalize="characters" style="text-transform:uppercase;letter-spacing:.35em;text-align:center"></label>
+    <button id="btnJoin">UNIRSE A LA SALA</button>
+    <p class="sub" id="onMsg" style="min-height:2.4em;color:#ff7a7a"></p>
+    <button data-go="main">VOLVER</button>
+   </div>
+   <div class="panel hidden" id="m-room" style="width:80%">
+    <h2>SALA <span id="rmCode" style="color:#fff;letter-spacing:.25em"></span></h2>
+    <p class="sub">Comparte este codigo (maximo 4 jugadores). Cada jugador elige su personaje con ◀ ▶.</p>
+    <div id="rmSlots" style="display:grid;grid-template-columns:repeat(4,1fr);gap:.6em"></div>
+    <p class="sub" id="rmCfg"></p>
+    <div id="rmHost" style="display:flex;flex-direction:column;gap:.6em">
+     <button id="rmMap"></button>
+     <div class="row"><button id="rmRounds"></button><button id="rmBots"></button></div>
+     <div class="row"><button id="rmSudden"></button><button id="rmItems"></button></div>
+     <button id="rmStart" class="go">¡COMENZAR!</button>
+    </div>
+    <p class="sub" id="rmMsg" style="min-height:1.6em;color:#ffd34d"></p>
+    <button id="rmLeave">SALIR DE LA SALA</button>
    </div>
    <div class="panel hidden" id="m-chars" style="width:78%">
     <h2>ELEGIR PERSONAJES</h2>
@@ -188,7 +216,7 @@ const firebaseConfig = {
     };
     const first = new Promise(res => { const un = A.onAuthStateChanged(auth, u => { un(); res(u); }); });
     window.FB = {
-      ok: true,
+      ok: true, D, db,
       restore: async () => { const u = await first; return u ? readProfile(u) : null; },
       async register(id, pw, nat) {
         const cred = await A.createUserWithEmailAndPassword(auth, mail(id), pw);
@@ -283,6 +311,7 @@ function noise(d, vol) {
   s.connect(f); f.connect(g); g.connect(a.destination); s.start(); s.stop(a.currentTime + d);
 }
 function sfx(n) {
+  if (NET.host && G && G.net === 'host' && EVOK.has(n) && NET.evq.length < 16) NET.evq.push(n);
   if (!AC) return;
   switch (n) {
     case 'place': tone(200, .09, 'square', .09, -80); break;
@@ -330,7 +359,7 @@ addEventListener('keydown', e => {
   if (state !== 'play' && (c === 'ArrowDown' || c === 'ArrowUp')) { navMenu(c === 'ArrowDown' ? 1 : -1); e.preventDefault(); }
 });
 addEventListener('keyup', e => { if (isField(e)) return; if (rebind) { e.preventDefault(); return; } keys[normCode(e)] = false; });
-addEventListener('blur', () => { for (const k in keys) keys[k] = false; if (state === 'play') pauseGame(); });
+addEventListener('blur', () => { for (const k in keys) keys[k] = false; if (state === 'play' && !NET.inGame) pauseGame(); });
 function navMenu(dir) {
   const p = document.querySelector('.panel:not(.hidden)'); if (!p) return;
   const bs = Array.from(p.querySelectorAll('button')); if (!bs.length) return;
@@ -491,9 +520,10 @@ function readCtrl(c, p) {
   return {dx: best === 'left' ? -1 : best === 'right' ? 1 : 0, dy: best === 'up' ? -1 : best === 'down' ? 1 : 0, bomb};
 }
 function readInput(p) {
+  if (NET.menuOpen) return {dx:0, dy:0, bomb:false};
   let dx = 0, dy = 0, bomb = false;
   for (const c of p.ctrls) { const r = readCtrl(c, p); if (!dx && !dy) { dx = r.dx; dy = r.dy; } if (r.bomb) bomb = true; }
-  if (G && p === G.players.find(q => !q.bot)) {
+  if (G && (p.local || (!G.net && p === G.players.find(q => !q.bot)))) {
     if (!dx && !dy) { if (touch.left) dx = -1; else if (touch.right) dx = 1; else if (touch.up) dy = -1; else if (touch.down) dy = 1; }
     if (touch.bomb) bomb = true;
   }
@@ -570,7 +600,7 @@ function resetPlayer(p, full) {
 function loadMap(layout, themeKey, dens, itemChance, withExit, story) {
   const m = buildLevel(layout, dens, itemChance, withExit, story);
   G.grid = m.grid; G.hid = m.hid; G.items = m.items; G.fire = m.fire; G.fo = m.fo; G.exit = m.exit;
-  G.flames = []; G.bombs = []; G.enemies = []; G.parts = []; G.texts = []; G.theme = THEMES[themeKey]; G.exitCd = 0;
+  G.flames = []; G.bombs = []; G.enemies = []; G.parts = []; G.texts = []; G.theme = THEMES[themeKey]; G.themeKey = themeKey; G.exitCd = 0;
 }
 
 /* ---------- Historia ---------- */
@@ -615,7 +645,7 @@ function startRound() {
   let mm = BATTLE_MAPS[settings.map];
   if (mm.random) mm = pick(BATTLE_MAPS.filter(m => !m.random));
   loadMap(mm.layout, mm.theme, .62, [.12, .3, .5][settings.items], false, false);
-  for (const p of G.players) resetPlayer(p, true);
+  for (const p of G.players) { resetPlayer(p, true); if (p.left) { p.alive = false; p.deadT = 999; } }
   G.time = 180 * 60; G.sudden = false; G.spiral = makeSpiral(); G.spiralIdx = 0; G.sdT = 0; G.endT = 0; G.sdMsg = 0;
   G.phase = 'intro'; G.phaseT = 110; G.introText = 'RONDA ' + G.round; G.introSub = mm.n.toUpperCase();
 }
@@ -1014,12 +1044,13 @@ function botInput(p) {
    ACTUALIZACION
 ===================================================================== */
 function updatePlayer(p) {
+  if (p.left && p.alive && G.phase === 'play') killPlayer(p, true);
   if (!p.alive) {
     p.deadT++;
     if (G.mode !== 'battle' && p.lives > 0 && p.deadT > 110 && G.phase === 'play') { resetPlayer(p, false); p.invuln = 200; }
     return;
   }
-  const inp = p.bot ? botInput(p) : readInput(p);
+  const inp = p.bot ? botInput(p) : p.remote ? remoteInput(p) : readInput(p);
   p.mv = false;
   if (inp.dx || inp.dy) {
     p.dir = inp.dx < 0 ? 'left' : inp.dx > 0 ? 'right' : inp.dy < 0 ? 'up' : 'down';
@@ -1044,7 +1075,9 @@ function updateFx() {
 }
 function update() {
   if (!G) return;
+  if (G.net === 'client') { clientUpdate(); return; }
   G.t++;
+  if (G.net === 'host' && G.phase !== 'play') syncRemoteB();
   if (G.phase === 'intro') { if (--G.phaseT <= 0) { G.phase = 'play'; G.goT = 50; } updateFx(); return; }
   if (G.phase === 'clear') { G.phaseT--; updateFx(); for (const b of G.bombs) b.timer = 9999; if (G.phaseT <= 0) afterClear(); keyP_clear(); return; }
   if (G.phase === 'over') { G.overT++; updateFx(); for (const p of G.players) p.deadT++; if (G.overT > 130) { go('quit'); return; } keyP_clear(); return; }
@@ -1104,7 +1137,7 @@ function dropBlock() {
 }
 function finishRound(w) {
   G.phase = 'clear'; G.phaseT = 170;
-  if (w) { w.wins++; G.clearText = 'JUGADOR ' + (w.i + 1) + (w.bot ? ' (BOT)' : '') + ' GANA'; w.invuln = 9999; } else G.clearText = 'EMPATE';
+  if (w) { w.wins++; G.clearText = (w.name ? w.name.toUpperCase() : 'JUGADOR ' + (w.i + 1) + (w.bot ? ' (BOT)' : '')) + ' GANA'; w.invuln = 9999; } else G.clearText = 'EMPATE';
   G.introSub = ''; sfx('win');
 }
 function stageClear(p) {
@@ -1115,6 +1148,7 @@ function stageClear(p) {
 function afterClear() {
   if (G.mode === 'battle') {
     const w = G.players.find(p => p.wins >= G.target);
+    if (w && G.net === 'host') { onlineEnd(w); return; }
     if (w) {
       const tbl = G.players.map(p => 'J' + (p.i + 1) + (p.bot ? ' BOT' : '') + ': ' + p.wins).join('  ·  ');
       sfx('win'); showResult('¡JUGADOR ' + (w.i + 1) + ' GANA!', tbl, [['REVANCHA', 'rematch'], ['MENU', 'quit']]);
@@ -1405,7 +1439,7 @@ function drawHUD() {
     const cx = p.i < 2 ? lx : rx, y0 = 130 + (p.i % 2) * 245;
     ctx.save(); ctx.globalAlpha = (p.alive || G.mode !== 'battle') ? 1 : .4;
     drawBomber(cx, y0 + 28, p.col, 'down', 0, false, 1.1, 0, {ch:p.ch});
-    txt((p.i === 0 && !p.bot && USER) ? USER.id.toUpperCase().slice(0, 10) : 'J' + (p.i + 1) + (p.bot ? ' BOT' : ''), cx, y0 + 78, 11, '#fff', 'center');
+    txt(p.name ? p.name.toUpperCase().slice(0, 10) : (p.i === 0 && !p.bot && USER) ? USER.id.toUpperCase().slice(0, 10) : 'J' + (p.i + 1) + (p.bot ? ' BOT' : ''), cx, y0 + 78, 11, '#fff', 'center');
     if (G.mode === 'battle') txt('VICT ' + p.wins, cx, y0 + 102, 10, '#ffd34d', 'center');
     else if (G.coop && isOut(p) && p.deadT > 70) { txt('ELIMINADO', cx, y0 + 102, 9, '#ff6060', 'center'); txt('ESPERA 1UP', cx, y0 + 124, 8, '#9fe8ff', 'center'); }
     else { txt('VIDA ' + Math.max(0, p.lives), cx, y0 + 102, 10, '#ffd34d', 'center'); txt(String(p.score), cx, y0 + 124, 10, '#fff', 'center'); }
@@ -1459,7 +1493,7 @@ function toggleFull() {
   if (document.fullscreenElement || document.webkitFullscreenElement) { try { (document.exitFullscreen || document.webkitExitFullscreen).call(document); } catch (e) {} }
   else goFull();
 }
-document.addEventListener('fullscreenchange', () => { if (!document.fullscreenElement && state === 'play') pauseGame(); });
+document.addEventListener('fullscreenchange', () => { if (!document.fullscreenElement && state === 'play' && !NET.inGame) pauseGame(); });
 $('btnFull').onclick = toggleFull; $('btnFull2').onclick = toggleFull;
 let curPanel = 'm-main', ctrlBack = 'm-main', charsBack = 'm-main', ptick = 0;
 function showPanel(id) {
@@ -1472,11 +1506,22 @@ function showPanel(id) {
 }
 function hideUI() { $('touch').classList.add('on'); ui.classList.add('off'); if (document.activeElement && document.activeElement.blur) document.activeElement.blur(); }
 function enterPlay() { hideUI(); state = 'play'; ac(); acc = 0; }
-function pauseGame() { if (state !== 'play') return; state = 'pause'; showPanel('m-pause'); }
-function resumeGame() { if (state !== 'pause') return; hideUI(); state = 'play'; acc = 0; }
+function setPauseLabels(online) {
+  const q = document.querySelector('#m-pause [data-go="quit"]'); if (q) q.textContent = online ? 'SALIR DE LA PARTIDA' : 'SALIR AL MENU';
+  for (const a of ['restart', 'controls']) { const b = document.querySelector('#m-pause [data-go="' + a + '"]'); if (b) b.style.display = online ? 'none' : ''; }
+}
+function pauseGame() {
+  if (state !== 'play') return;
+  if (NET.inGame) { if (NET.menuOpen) { resumeGame(); return; } NET.menuOpen = true; setPauseLabels(true); showPanel('m-pause'); return; }   // online: el juego no se detiene
+  state = 'pause'; setPauseLabels(false); showPanel('m-pause');
+}
+function resumeGame() {
+  if (NET.inGame && NET.menuOpen) { NET.menuOpen = false; hideUI(); return; }
+  if (state !== 'pause') return; hideUI(); state = 'play'; acc = 0;
+}
 function flash(msg) { if (G && G.texts) G.texts.push({x:W / 2, y:300, t:0, s:msg, c:'#fff'}); alert(msg); }
 function showResult(title, text, btns) {
-  state = 'menu'; $('resT').textContent = title; $('resP').innerHTML = text.replace(/\n/g, '<br>');
+  state = 'menu'; $('resT').textContent = title; $('resP').innerHTML = String(text).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])).replace(/\n/g, '<br>');
   const c = $('resB'); c.innerHTML = '';
   btns.forEach(([label, act], i) => { const b = document.createElement('button'); b.textContent = label; if (i === 0) b.className = 'go'; b.onclick = () => go(act); c.appendChild(b); });
   showPanel('m-result');
@@ -1492,13 +1537,21 @@ function go(a) {
     case 'charsback': if (charsBack === 'm-battle') go('battle'); else showPanel(charsBack || 'm-main'); break;
     case 'ctrlback': rebind = null; if (ctrlBack === 'm-battle') go('battle'); else if (ctrlBack === 'm-help') go('help'); else showPanel(ctrlBack || 'm-main'); break;
     case 'battle': refreshBattleUI(); showPanel('m-battle'); break;
+    case 'online':
+      if (NET.room && !NET.inGame) { renderRoom(); showPanel('m-room'); }
+      else { onMsg(netOK() ? '' : 'NECESITAS UNA CUENTA EN LINEA (FIREBASE). EN MODO LOCAL NO SE PUEDE JUGAR ONLINE'); showPanel('m-online'); }
+      break;
+    case 'roomback':
+      NET.inGame = false; NET.menuOpen = false; G = null; state = 'menu';
+      if (NET.room) { renderRoom(); showPanel('m-room'); } else showPanel('m-main');
+      break;
     case 'story1': startStory(false); break;
     case 'story2': startStory(true); break;
     case 'resume': resumeGame(); break;
     case 'restart': if (G && G.mode === 'battle') startBattle(); else if (G) startStory(G.coop); break;
     case 'retry': { const keep = G.stage, coop = G.coop; startStory(coop); startStage(keep, true); break; }
     case 'rematch': startBattle(); break;
-    case 'quit': G = null; state = 'menu'; showPanel('m-main'); break;
+    case 'quit': if (NET.room) leaveRoom(); G = null; state = 'menu'; showPanel('m-main'); break;
   }
 }
 document.querySelectorAll('[data-go]').forEach(b => { b.onclick = () => go(b.dataset.go); });
@@ -1577,11 +1630,360 @@ $('btnStart').onclick = () => { ac(); goFull(); startBattle(); };
 let last = performance.now(), acc = 0;
 function frame(t) {
   const dt = Math.min(100, t - last); last = t;
-  if (state === 'play') { acc += dt; let n = 0; while (acc >= 1000 / 60 && n < 5) { update(); acc -= 1000 / 60; n++; } if (n >= 5) acc = 0; }
+  if (state === 'play') { acc += dt; let n = 0; while (acc >= 1000 / 60 && n < 5) { update(); if (G && G.net === 'host') hostPublish(); acc -= 1000 / 60; n++; } if (n >= 5) acc = 0; }
   render();
   if (curPanel === 'm-chars' && !ui.classList.contains('off')) drawPreviews();
+  if (curPanel === 'm-room' && !ui.classList.contains('off')) drawRoomPreviews();
   requestAnimationFrame(frame);
 }
+/* =====================================================================
+   BATALLA ONLINE (Firebase Realtime Database)
+   El anfitrion (host) ejecuta la simulacion completa del juego. Los demas jugadores
+   envian sus teclas (rooms/<sala>/in/<uid>) y reciben el estado (rooms/<sala>/state y /map).
+===================================================================== */
+const NET = {room:null, host:false, uid:null, slot:-1, meta:null, players:{}, slots:{}, inputs:{}, subs:[], gsubs:[], od:[],
+  inGame:false, menuOpen:false, lp:null, bc:0, lastSent:null, sentT:0, snapTick:0, seq:0, lastSeq:-1, lastMap:'', mv:0, evq:[], busy:false};
+const EVOK = new Set(['place', 'boom', 'item', 'die', 'kick', 'win', 'thud']);
+const DIRN = ['down', 'up', 'left', 'right'];
+const ITC = {bomb:'b', fire:'f', speed:'s', kick:'k', vest:'v', life:'l'}, ITN = {b:'bomb', f:'fire', s:'speed', k:'kick', v:'vest', l:'life'};
+const FBD = () => window.FB.D;
+const dbr = p => FBD().ref(window.FB.db, p);
+const roomRef = p => dbr('rooms/' + NET.room + (p ? '/' + p : ''));
+const netOK = () => !!(FBOK && USER && USER.uid && window.FB && window.FB.D);
+const onMsg = t => { $('onMsg').textContent = t || ''; };
+const rmMsg = t => { $('rmMsg').textContent = t || ''; };
+const pnm = p => (p.name || ('JUGADOR ' + (p.i + 1))).toUpperCase();
+const nerr = e => {
+  const c = String((e && (e.code || e.message)) || '');
+  if (/permission/i.test(c)) return 'SIN PERMISO: PUBLICA LAS REGLAS NUEVAS EN FIREBASE';
+  if (/network|offline|disconnect/i.test(c)) return 'SIN CONEXION';
+  return 'ERROR: ' + c.slice(0, 40).toUpperCase();
+};
+const subTo = (ref, cb, list) => { (list || NET.subs).push(FBD().onValue(ref, cb, e => console.warn('RTDB:', e))); };
+const metaOut = m => {
+  const o = {host:m.host, status:m.status, created:m.created, map:m.map | 0, rounds:m.rounds | 0, sudden:!!m.sudden, items:m.items | 0, bots:!!m.bots};
+  if (m.last) o.last = String(m.last).slice(0, 280);
+  return o;
+};
+async function saveMeta(patch) { NET.meta = Object.assign({}, NET.meta, patch); await FBD().set(roomRef('meta'), metaOut(NET.meta)); }
+const genCode = () => { const a = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; let s = ''; for (let i = 0; i < 4; i++) s += a[Math.floor(rnd() * a.length)]; return s; };
+const pickChar = used => { const pref = settings.chars[0]; if (!used.includes(pref)) return pref; const f = [0, 1, 2, 3].find(c => !used.includes(c)); return f === undefined ? 0 : f; };
+const playerObj = (slot, ch) => { const o = {name:USER.id, ch, slot}; if (USER.nat) o.nat = String(USER.nat).slice(0, 30); return o; };
+
+/* ---------- Salas ---------- */
+async function createRoom() {
+  if (!netOK()) { onMsg('NECESITAS UNA CUENTA EN LINEA (FIREBASE)'); return; }
+  if (NET.busy) return; NET.busy = true; onMsg('CREANDO SALA...');
+  const D = FBD();
+  try {
+    let code = null;
+    for (let k = 0; k < 8 && !code; k++) { const c = genCode(); const s = await D.get(dbr('rooms/' + c + '/meta')); if (!s.exists()) code = c; }
+    if (!code) throw new Error('No se pudo generar un codigo');
+    NET.room = code; NET.host = true; NET.uid = USER.uid; NET.meta = null; NET.slot = 0; NET.players = {}; NET.slots = {}; NET.inputs = {};
+    await saveMeta({host:USER.uid, status:'lobby', created:Date.now(), map:settings.map, rounds:settings.rounds, sudden:settings.sudden, items:settings.items, bots:false, last:''});
+    const r = await D.runTransaction(roomRef('slots/0'), cur => (cur === null || cur === USER.uid) ? USER.uid : undefined);
+    if (!r.committed) throw new Error('No se pudo reservar el puesto');
+    await D.set(roomRef('players/' + USER.uid), playerObj(0, pickChar([])));
+    const od = D.onDisconnect(roomRef()); od.remove(); NET.od.push(od);   // si el anfitrion se desconecta, la sala se borra
+    attachRoom(); onMsg(''); rmMsg(''); renderRoom(); showPanel('m-room');
+  } catch (e) { console.warn(e); onMsg(nerr(e)); await leaveRoom(); }
+  finally { NET.busy = false; }
+}
+async function joinRoom() {
+  if (!netOK()) { onMsg('NECESITAS UNA CUENTA EN LINEA (FIREBASE)'); return; }
+  const code = $('onCode').value.trim().toUpperCase();
+  if (!/^[A-Z2-9]{4}$/.test(code)) { onMsg('EL CODIGO TIENE 4 LETRAS O NUMEROS'); return; }
+  if (NET.busy) return; NET.busy = true; onMsg('BUSCANDO SALA...');
+  const D = FBD(); let slot = -1;
+  try {
+    const ms = await D.get(dbr('rooms/' + code + '/meta'));
+    if (!ms.exists()) { onMsg('SALA NO ENCONTRADA'); return; }
+    const m = ms.val(); if (m.status !== 'lobby') { onMsg('ESA PARTIDA YA EMPEZO'); return; }
+    NET.room = code; NET.host = false; NET.uid = USER.uid; NET.meta = m; NET.players = {}; NET.slots = {}; NET.inputs = {};
+    for (let i = 0; i < 4 && slot < 0; i++) {
+      const r = await D.runTransaction(roomRef('slots/' + i), cur => (cur === null || cur === USER.uid) ? USER.uid : undefined);
+      if (r.committed) slot = i;
+    }
+    if (slot < 0) { onMsg('LA SALA ESTA LLENA'); NET.room = null; return; }
+    NET.slot = slot;
+    const ps = (await D.get(roomRef('players'))).val() || {};
+    for (const p of [roomRef('slots/' + slot), roomRef('players/' + USER.uid), roomRef('in/' + USER.uid)]) { const od = D.onDisconnect(p); od.remove(); NET.od.push(od); }
+    await D.set(roomRef('players/' + USER.uid), playerObj(slot, pickChar(Object.values(ps).map(p => p.ch))));
+    attachRoom(); onMsg(''); rmMsg(''); renderRoom(); showPanel('m-room');
+  } catch (e) { console.warn(e); onMsg(nerr(e)); await leaveRoom(); }
+  finally { NET.busy = false; }
+}
+function attachRoom() {
+  subTo(roomRef('meta'), onMeta);
+  subTo(roomRef('players'), s => { NET.players = s.val() || {}; if (curPanel === 'm-room' && !NET.inGame) renderRoom(); });
+  subTo(roomRef('slots'), s => { NET.slots = s.val() || {}; checkLeft(); if (curPanel === 'm-room' && !NET.inGame) renderRoom(); });
+  if (NET.host) subTo(roomRef('in'), s => { NET.inputs = s.val() || {}; });
+}
+function onMeta(snap) {
+  const m = snap.val();
+  if (!m) { if (NET.room && !NET.host) { leaveRoom(); showPanel('m-online'); onMsg('LA SALA SE CERRO (EL ANFITRION SE FUE)'); } return; }
+  NET.meta = m;
+  if (!NET.host) {
+    if (m.status === 'play' && (!NET.inGame || state === 'menu')) startOnlineClient();
+    else if (m.status === 'lobby' && NET.inGame && state === 'play') endClientGame(m.last);
+  }
+  if (curPanel === 'm-room' && !NET.inGame) renderRoom();
+}
+function checkLeft() { if (!G || G.net !== 'host') return; for (const p of G.players) if (p.remote && NET.slots[p.i] !== p.uid) p.left = true; }
+async function leaveRoom() {
+  const code = NET.room, host = NET.host, slot = NET.slot, uid = NET.uid;
+  NET.subs.concat(NET.gsubs).forEach(u => { try { u(); } catch (e) {} }); NET.subs = []; NET.gsubs = [];
+  NET.od.forEach(o => { try { o.cancel(); } catch (e) {} }); NET.od = [];
+  if (NET.inGame) { G = null; state = 'menu'; }
+  NET.inGame = false; NET.menuOpen = false; NET.room = null; NET.host = false; NET.slot = -1; NET.meta = null; NET.players = {}; NET.slots = {}; NET.inputs = {}; NET.lp = null;
+  if (!code) return;
+  const D = FBD(), P = p => dbr('rooms/' + code + (p ? '/' + p : ''));
+  try {
+    if (host) await D.remove(P());
+    else { await D.remove(P('players/' + uid)); await D.remove(P('in/' + uid)); if (slot >= 0) await D.remove(P('slots/' + slot)); }
+  } catch (e) { console.warn(e); }
+}
+
+/* ---------- Sala (lobby) ---------- */
+function renderRoom() {
+  if (!NET.room) return;
+  const m = NET.meta || {};
+  $('rmCode').textContent = NET.room;
+  const box = $('rmSlots'); box.innerHTML = '';
+  for (let i = 0; i < 4; i++) {
+    const uid = NET.slots[i], pl = uid && NET.players[uid], mine = !!uid && uid === NET.uid;
+    const card = document.createElement('div'); card.className = 'ccard'; card.style.borderColor = PCOL[i];
+    const h = document.createElement('b'); h.style.color = PCOL[i]; h.textContent = 'J' + (i + 1) + (i === 0 ? ' ★' : '') + (mine ? ' (TU)' : '');
+    const cn = document.createElement('canvas'); cn.className = 'rpv'; cn.width = 120; cn.height = 150; cn.dataset.i = i; cn.dataset.ch = pl ? pl.ch : -1;
+    const nm = document.createElement('div'); nm.className = 'nm';
+    nm.textContent = pl ? String(pl.name).toUpperCase().slice(0, 12) : uid ? 'CONECTANDO...' : m.bots ? 'BOT' : 'ESPERANDO...';
+    const sm = document.createElement('div'); sm.className = 'sm'; sm.textContent = pl ? CHARS[pl.ch | 0].name + (pl.nat ? ' · ' + String(pl.nat).toUpperCase().slice(0, 12) : '') : '';
+    card.append(h, cn, nm, sm);
+    if (mine && pl) {
+      const row = document.createElement('div'); row.className = 'row';
+      [['◀', -1, 'l'], ['▶', 1, 'r']].forEach(([t, d, k]) => { const b = document.createElement('button'); b.textContent = t; b.dataset.r = k; b.onclick = () => roomChar(d); row.appendChild(b); });
+      card.appendChild(row);
+    }
+    box.appendChild(card);
+  }
+  const isHost = NET.host;
+  const mapN = BATTLE_MAPS[m.map | 0] ? BATTLE_MAPS[m.map | 0].n.toUpperCase() : '?', rN = ['1', 'MEJOR DE 3', 'MEJOR DE 5'][m.rounds | 0], iN = ['POCOS', 'NORMAL', 'MUCHOS'][m.items | 0];
+  $('rmHost').style.display = isHost ? 'flex' : 'none';
+  $('rmCfg').style.display = isHost ? 'none' : 'block';
+  $('rmCfg').textContent = 'MAPA: ' + mapN + ' · RONDAS: ' + rN + ' · MUERTE SUBITA: ' + (m.sudden ? 'SI' : 'NO') + ' · OBJETOS: ' + iN + ' · BOTS: ' + (m.bots ? 'SI' : 'NO') + '\nESPERANDO AL ANFITRION (J1)...';
+  $('rmCfg').style.whiteSpace = 'pre-line';
+  if (isHost) {
+    $('rmMap').textContent = 'MAPA: ' + mapN; $('rmRounds').textContent = 'RONDAS: ' + rN;
+    $('rmSudden').textContent = 'MUERTE SUBITA: ' + (m.sudden ? 'SI' : 'NO'); $('rmItems').textContent = 'OBJETOS: ' + iN;
+    $('rmBots').textContent = 'RELLENAR CON BOTS: ' + (m.bots ? 'SI' : 'NO');
+  }
+}
+async function roomChar(d) {
+  const me = NET.players[NET.uid]; if (!me) return;
+  const used = Object.keys(NET.players).filter(u => u !== NET.uid).map(u => NET.players[u].ch);
+  let c = me.ch;
+  for (let k = 0; k < 4; k++) { c = (c + d + 4) % 4; if (!used.includes(c)) break; }
+  if (c === me.ch) return;
+  NET.players[NET.uid] = Object.assign({}, me, {ch:c}); renderRoom(); sfx('place');
+  const b = document.querySelector('#rmSlots [data-r="' + (d < 0 ? 'l' : 'r') + '"]'); if (b) b.focus();
+  try { await FBD().set(roomRef('players/' + NET.uid), playerObj(me.slot, c)); } catch (e) { rmMsg(nerr(e)); }
+}
+async function hostOpt(patch, focusId) {
+  if (!NET.host || !NET.meta) return;
+  try { await saveMeta(patch); } catch (e) { rmMsg(nerr(e)); }
+  renderRoom(); const b = $(focusId); if (b) b.focus();
+}
+let rtick = 0;
+function drawRoomPreviews() {
+  const main = ctx; rtick++;
+  const dirs = ['down', 'right', 'up', 'left'], dir = dirs[Math.floor(rtick / 70) % 4];
+  document.querySelectorAll('canvas.rpv').forEach(cn => {
+    const ch = +cn.dataset.ch; ctx = cn.getContext('2d'); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, cn.width, cn.height);
+    if (ch >= 0) drawBomber(60, 92, PCOL[+cn.dataset.i], dir, rtick, true, 1.9, 0, {ch, t:rtick});
+  });
+  ctx = main;
+}
+async function hostStart() {
+  if (!NET.host || NET.inGame || NET.busy || !NET.meta) return;
+  const humans = [0, 1, 2, 3].filter(i => NET.slots[i] && NET.players[NET.slots[i]]).length;
+  if (humans < 2 && !NET.meta.bots) { rmMsg('NECESITAS AL MENOS 2 JUGADORES (O ACTIVA LOS BOTS)'); return; }
+  ac(); goFull(); rmMsg('');
+  try { await saveMeta({status:'play', last:''}); } catch (e) { rmMsg(nerr(e)); return; }
+  startOnlineHost();
+}
+
+/* ---------- Partida: anfitrion ---------- */
+function startOnlineHost() {
+  const m = NET.meta;
+  settings.map = m.map | 0; settings.rounds = m.rounds | 0; settings.sudden = !!m.sudden; settings.items = m.items | 0;
+  const used = new Set(), ps = [];
+  for (let i = 0; i < 4; i++) {
+    const uid = NET.slots[i], pl = uid && NET.players[uid]; if (!pl) continue;
+    let ch = pl.ch | 0; if (used.has(ch)) ch = [0, 1, 2, 3].find(c => !used.has(c)); used.add(ch);
+    const mine = uid === NET.uid, p = makePlayer(i, mine ? ['kb1', 'kb2', 'pad0'] : [], false, 1);
+    p.ch = ch; p.uid = uid; p.name = String(pl.name || 'J' + (i + 1)); p.local = mine; p.remote = !mine; p.lastB = ((NET.inputs[uid] || {}).b) | 0;
+    if (mine) NET.lp = p;
+    ps.push(p);
+  }
+  if (m.bots) for (let i = 0; i < 4; i++) if (!ps.some(p => p.i === i)) {
+    const ch = [0, 1, 2, 3].find(c => !used.has(c)); used.add(ch);
+    const p = makePlayer(i, [], true, settings.botSkill); p.ch = ch; p.name = 'BOT ' + (i + 1); ps.push(p);
+  }
+  ps.sort((a, b) => a.i - b.i);
+  G = baseG('battle'); G.net = 'host'; G.players = ps; G.target = [1, 2, 3][settings.rounds]; G.round = 0;
+  NET.lastMap = ''; NET.snapTick = 0; NET.evq = []; NET.inGame = true; NET.menuOpen = false;
+  fbLog('game_start', {mode: 'battle_online'});
+  startRound(); enterPlay();
+}
+function remoteInput(p) {
+  const r = NET.inputs[p.uid] || {}, b = r.b | 0, bomb = b > p.lastB; p.lastB = b;
+  let dx = Math.sign(r.dx | 0), dy = Math.sign(r.dy | 0); if (dx && dy) dy = 0;
+  return {dx, dy, bomb};
+}
+function syncRemoteB() { for (const p of G.players) if (p.remote) { const r = NET.inputs[p.uid]; p.lastB = r ? r.b | 0 : 0; } }
+function hostPublish() {
+  if (!G || G.net !== 'host' || ++NET.snapTick % 3) return;      // 20 envios por segundo
+  const D = FBD(), P = {};
+  for (const p of G.players) P[p.i] = [Math.round(p.x), Math.round(p.y), Math.max(0, DIRN.indexOf(p.dir)), p.alive ? 1 : 0, p.ch, p.mv ? 1 : 0, Math.min(999, p.shield | 0),
+    Math.min(9999, p.invuln | 0), p.bombs, p.range, p.lvl, p.kick ? 1 : 0, p.wins, p.placeT > 0 ? p.placeT : 0].join(',');
+  const bs = G.bombs.map(b => [b.gx, b.gy, b.ox, b.oy, b.vx, b.vy, b.off, b.timer].join(',')).join(';');
+  const fs = G.flames.map(f => [f.x, f.y, f.t, f.kind].join(',')).join(';');
+  const st = {s:++NET.seq, ph:G.phase, pt:G.phaseT, tx:G.introText || '', sb:G.introSub || null, ct:G.clearText || null, tm:G.time, rd:G.round, tg:G.target, sd:G.sdMsg, gt:G.goT, th:G.themeKey || 'grass',
+    p:P, b:bs || null, f:fs || null, ev:NET.evq.length ? NET.evq.join(',') : null};
+  NET.evq = [];
+  D.set(roomRef('state'), st).catch(e => console.warn(e));
+  let g = '', it = '';
+  for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) { g += G.grid[y][x]; it += G.items[y][x] ? ITC[G.items[y][x]] : '0'; }
+  const key = g + it + st.th;
+  if (key !== NET.lastMap) { NET.lastMap = key; D.set(roomRef('map'), {g, i:it, th:st.th, v:++NET.mv}).catch(e => console.warn(e)); }
+}
+function onlineEnd(w) {
+  const title = '¡' + pnm(w) + ' GANA!', tbl = G.players.map(p => pnm(p) + ': ' + p.wins).join('  ·  ');
+  sfx('win'); NET.menuOpen = false;
+  saveMeta({status:'lobby', last:title + '\n' + tbl}).catch(e => console.warn(e));
+  showResult(title, tbl, [['VOLVER A LA SALA', 'roomback']]);
+}
+
+/* ---------- Partida: clientes ---------- */
+function addClientPlayer(i) {
+  const uid = NET.slots[i], pl = uid && NET.players[uid];
+  const p = {i, ch:pl ? pl.ch | 0 : i, col:PCOL[i], name:pl ? String(pl.name) : 'BOT ' + (i + 1), uid, bot:!pl, x:0, y:0, tx:0, ty:0, dir:'down', alive:true, mv:false, srvMv:false, anim:0,
+    shield:0, invuln:0, placeT:0, deadT:0, wins:0, bombs:1, range:2, lvl:0, sp:2.2, kick:false, lives:3, score:0, prev:{}, ctrls:[], active:0, first:true};
+  if (uid && uid === NET.uid) { p.ctrls = ['kb1', 'kb2', 'pad0']; p.local = true; NET.lp = p; }
+  G.players.push(p); G.players.sort((a, b) => a.i - b.i);
+  return p;
+}
+function startOnlineClient() {
+  NET.gsubs.forEach(u => { try { u(); } catch (e) {} }); NET.gsubs = [];
+  const grid = () => { const a = []; for (let y = 0; y < ROWS; y++) a.push(new Array(COLS).fill(0)); return a; };
+  G = baseG('battle'); G.net = 'client'; G.grid = grid(); G.items = grid().map(r => r.map(() => null)); G.fire = grid(); G.fo = grid(); G.hid = G.items; G.themeKey = 'grass';
+  G.phase = 'intro'; G.phaseT = 99999; G.introText = 'CONECTANDO...'; G.mapInit = false;
+  NET.lp = null; NET.lastSeq = -1; NET.lastSent = null; NET.menuOpen = false; NET.inGame = true;
+  for (let i = 0; i < 4; i++) if (NET.slots[i] && NET.players[NET.slots[i]]) addClientPlayer(i);
+  subTo(roomRef('map'), s => applyMap(s.val()), NET.gsubs);
+  subTo(roomRef('state'), s => applyState(s.val()), NET.gsubs);
+  enterPlay();
+}
+function endClientGame(last) {
+  NET.gsubs.forEach(u => { try { u(); } catch (e) {} }); NET.gsubs = [];
+  const lines = String(last || 'FIN DE LA PARTIDA').split('\n');
+  showResult(lines[0], lines.slice(1).join('\n'), [['VOLVER A LA SALA', 'roomback']]);
+}
+function softFx(x, y) {
+  const th = G.theme;
+  for (let i = 0; i < 9; i++) G.parts.push({x:(x + .5) * TS, y:(y + .5) * TS, vx:(rnd() - .5) * 6, vy:-rnd() * 5, t:0, life:30 + ri(0, 14), c:rnd() < .5 ? th.s1 : th.s2, s:4 + rnd() * 5, g:.28});
+}
+function applyMap(m) {
+  if (!m || !G || G.net !== 'client' || typeof m.g !== 'string') return;
+  if (m.th && THEMES[m.th]) { G.theme = THEMES[m.th]; G.themeKey = m.th; }
+  const fx = G.mapInit && G.phase === 'play';
+  for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) {
+    const k = y * COLS + x, nv = +m.g[k], ov = G.grid[y][x];
+    if (fx && ov === 2 && nv === 0) softFx(x, y);
+    if (fx && ov === 0 && nv === 1) puff(x, y, '#aaa');
+    G.grid[y][x] = nv;
+    const ic = m.i ? m.i[k] : '0'; G.items[y][x] = ITN[ic] || null;
+  }
+  G.mapInit = true;
+}
+function applyState(st) {
+  if (!st || !G || G.net !== 'client' || st.s < NET.lastSeq) return;
+  NET.lastSeq = st.s;
+  G.phase = st.ph; G.phaseT = st.pt; G.introText = st.tx || ''; G.introSub = st.sb || ''; G.clearText = st.ct || '';
+  G.time = st.tm; G.round = st.rd; G.target = st.tg; G.sdMsg = st.sd | 0; G.goT = st.gt | 0;
+  if (st.th && THEMES[st.th] && G.theme !== THEMES[st.th]) { G.theme = THEMES[st.th]; G.themeKey = st.th; }
+  for (let i = 0; i < 4; i++) {
+    const a = st.p && st.p[i]; if (!a) continue;
+    const v = String(a).split(',').map(Number);
+    let p = G.players.find(q => q.i === i); if (!p) p = addClientPlayer(i);
+    const was = p.alive; p.alive = !!v[3];
+    if (was && !p.alive) { p.deadT = 0; puff(Math.floor(p.x / TS), Math.floor(p.y / TS), p.col); }
+    p.tx = v[0]; p.ty = v[1];
+    if (p.first || (!was && p.alive)) { p.x = p.tx; p.y = p.ty; p.first = false; }
+    p.ch = v[4]; p.srvMv = !!v[5]; p.shield = v[6]; p.invuln = v[7]; p.bombs = v[8]; p.range = v[9]; p.lvl = v[10]; p.sp = 2.2 + p.lvl * .4; p.wins = v[12];
+    if (v[13] > p.placeT) p.placeT = v[13];
+    if (p !== NET.lp) p.dir = DIRN[v[2]] || 'down';
+  }
+  const old = G.bombs; G.bombs = [];
+  if (st.b) for (const s of String(st.b).split(';')) {
+    const a = s.split(',').map(Number), nb = {gx:a[0], gy:a[1], ox:a[2], oy:a[3], vx:a[4], vy:a[5], off:a[6], timer:a[7], ignore:new Set(), dead:false};
+    const prev = old.find(o => o.ox === nb.ox && o.oy === nb.oy);
+    if (prev) nb.ignore = prev.ignore; else if (NET.lp && NET.lp.alive && overlapsTile(NET.lp, nb.ox, nb.oy)) nb.ignore.add(NET.lp);
+    G.bombs.push(nb);
+  }
+  G.flames = [];
+  if (st.f) for (const s of String(st.f).split(';')) { const a = s.split(','); G.flames.push({x:+a[0], y:+a[1], t:+a[2], kind:a[3], o:-1}); }
+  if (st.ev) for (const e of String(st.ev).split(',')) sfx(e);
+}
+function clientUpdate() {
+  G.t++; updateFx();
+  for (const b of G.bombs) { b.timer--; for (const q of Array.from(b.ignore)) if (!q.alive || !overlapsTile(q, b.ox, b.oy)) b.ignore.delete(q); }
+  if (G.sdMsg > 0) G.sdMsg--; if (G.goT > 0) G.goT--;
+  const lp = NET.lp, inp = lp ? readInput(lp) : {dx:0, dy:0, bomb:false};
+  if (lp) sendInput(inp);
+  for (const p of G.players) {
+    if (p.placeT > 0) p.placeT--;
+    if (!p.alive) { p.deadT++; p.mv = false; continue; }
+    const ex = p.tx - p.x, ey = p.ty - p.y, d = Math.hypot(ex, ey);
+    if (p === lp) {                      // prediccion local: se mueve al instante y se corrige con el estado del anfitrion
+      p.mv = false;
+      if (G.phase === 'play' && (inp.dx || inp.dy)) {
+        p.dir = inp.dx < 0 ? 'left' : inp.dx > 0 ? 'right' : inp.dy < 0 ? 'up' : 'down';
+        movePlayer(p, inp.dx, inp.dy, p.sp); p.mv = true; p.anim++;
+        if (Math.hypot(p.tx - p.x, p.ty - p.y) > 64) { p.x = p.tx; p.y = p.ty; }
+      } else if (d > 48 || G.phase !== 'play') { p.x = p.tx; p.y = p.ty; }
+      else { p.x += ex * .25; p.y += ey * .25; }
+    } else {
+      if (d > 96) { p.x = p.tx; p.y = p.ty; } else { p.x += ex * .35; p.y += ey * .35; }
+      p.mv = p.srvMv || d > 1.5; if (p.mv) p.anim++;
+    }
+  }
+  keyP_clear();
+}
+function sendInput(inp) {
+  if (G.phase !== 'play' || NET.menuOpen) inp = {dx:0, dy:0, bomb:false};
+  if (inp.bomb) NET.bc++;
+  const cur = inp.dx + ',' + inp.dy + ',' + NET.bc, now = performance.now();
+  if (cur !== NET.lastSent && (inp.bomb || now - NET.sentT >= 40)) {
+    NET.lastSent = cur; NET.sentT = now;
+    FBD().set(roomRef('in/' + NET.uid), {dx:inp.dx, dy:inp.dy, b:NET.bc}).catch(e => console.warn(e));
+  }
+}
+
+/* ---------- Botones del menu online ---------- */
+$('btnCreate').onclick = createRoom;
+$('btnJoin').onclick = joinRoom;
+$('onCode').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); joinRoom(); } });
+$('onCode').addEventListener('input', e => { e.target.value = e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, ''); });
+$('rmLeave').onclick = async () => { const p = leaveRoom(); showPanel('m-online'); onMsg(''); await p; };
+$('rmStart').onclick = hostStart;
+$('rmMap').onclick = () => hostOpt({map:((NET.meta.map | 0) + 1) % BATTLE_MAPS.length}, 'rmMap');
+$('rmRounds').onclick = () => hostOpt({rounds:((NET.meta.rounds | 0) + 1) % 3}, 'rmRounds');
+$('rmSudden').onclick = () => hostOpt({sudden:!NET.meta.sudden}, 'rmSudden');
+$('rmItems').onclick = () => hostOpt({items:((NET.meta.items | 0) + 1) % 3}, 'rmItems');
+$('rmBots').onclick = () => hostOpt({bots:!NET.meta.bots}, 'rmBots');
+try { const q = new URLSearchParams(location.search).get('sala'); if (q) $('onCode').value = q.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4); } catch (e) {}
+
 /* =====================================================================
    CUENTAS (registro / inicio de sesion, guardado local en el navegador)
 ===================================================================== */
