@@ -1553,7 +1553,7 @@ function go(a) {
     case 'battle': refreshBattleUI(); showPanel('m-battle'); break;
     case 'online':
       if (NET.room && !NET.inGame) { renderRoom(); showPanel('m-room'); }
-      else { onMsg(netOK() ? '' : 'NECESITAS UNA CUENTA EN LINEA (FIREBASE). EN MODO LOCAL NO SE PUEDE JUGAR ONLINE'); showPanel('m-online'); }
+      else { onMsg(netOK() ? '' : 'INICIA SESION PARA JUGAR ONLINE'); showPanel('m-online'); }
       break;
     case 'roomback':
       NET.inGame = false; NET.menuOpen = false; G = null; state = 'menu';
@@ -1651,111 +1651,114 @@ function frame(t) {
   requestAnimationFrame(frame);
 }
 /* =====================================================================
-   BATALLA ONLINE (Firebase Realtime Database)
+   BATALLA ONLINE (WebSocket en Cloudflare Workers)
    El anfitrion (host) ejecuta la simulacion completa del juego. Los demas jugadores
-   envian sus teclas (rooms/<sala>/in/<uid>) y reciben el estado (rooms/<sala>/state y /map).
+   envian sus teclas por WebSocket y reciben el estado. El servidor solo gestiona la sala y retransmite.
 ===================================================================== */
-const NET = {room:null, host:false, uid:null, slot:-1, meta:null, players:{}, slots:{}, inputs:{}, subs:[], gsubs:[], od:[],
+const WS_URL = 'wss://bomberman-server.superbombardero.workers.dev/ws';   // tu Worker de Cloudflare
+const NET = {room:null, host:false, uid:null, slot:-1, meta:null, players:{}, slots:[], inputs:{}, ws:null, pingT:null,
   inGame:false, menuOpen:false, lp:null, bc:0, lastSent:null, sentT:0, snapTick:0, seq:0, lastSeq:-1, lastMap:'', mv:0, q:0, placeAt:0, evq:[], busy:false};
 const EVOK = new Set(['place', 'boom', 'item', 'die', 'kick', 'win', 'thud']);
 const DIRN = ['down', 'up', 'left', 'right'];
 const ITC = {bomb:'b', fire:'f', speed:'s', kick:'k', vest:'v', life:'l'}, ITN = {b:'bomb', f:'fire', s:'speed', k:'kick', v:'vest', l:'life'};
-const FBD = () => window.FB.D;
-const dbr = p => FBD().ref(window.FB.db, p);
-const roomRef = p => dbr('rooms/' + NET.room + (p ? '/' + p : ''));
-const netOK = () => !!(FBOK && USER && USER.uid && window.FB && window.FB.D);
+const myUid = () => USER.uid || ('l_' + USER.id.toLowerCase());
+const netOK = () => !!USER;
 const onMsg = t => { $('onMsg').textContent = t || ''; };
 const rmMsg = t => { $('rmMsg').textContent = t || ''; };
 const pnm = p => (p.name || ('JUGADOR ' + (p.i + 1))).toUpperCase();
-const nerr = e => {
-  const c = String((e && (e.code || e.message)) || '');
-  if (/permission/i.test(c)) return 'SIN PERMISO: PUBLICA LAS REGLAS NUEVAS EN FIREBASE';
-  if (/network|offline|disconnect/i.test(c)) return 'SIN CONEXION';
-  return 'ERROR: ' + c.slice(0, 40).toUpperCase();
-};
-const subTo = (ref, cb, list) => { (list || NET.subs).push(FBD().onValue(ref, cb, e => console.warn('RTDB:', e))); };
-const metaOut = m => {
-  const o = {host:m.host, status:m.status, created:m.created, map:m.map | 0, rounds:m.rounds | 0, sudden:!!m.sudden, items:m.items | 0, bots:!!m.bots};
-  if (m.last) o.last = String(m.last).slice(0, 280);
-  return o;
-};
-async function saveMeta(patch) { NET.meta = Object.assign({}, NET.meta, patch); await FBD().set(roomRef('meta'), metaOut(NET.meta)); }
+const nerr = e => String((e && e.message) || e || 'ERROR').toUpperCase().slice(0, 60);
+const wsSend = o => { const w = NET.ws; if (w && w.readyState === 1) { try { w.send(JSON.stringify(o)); } catch (e) {} } };
 const genCode = () => { const a = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; let s = ''; for (let i = 0; i < 4; i++) s += a[Math.floor(rnd() * a.length)]; return s; };
 const pickChar = used => { const pref = settings.chars[0]; if (!used.includes(pref)) return pref; const f = [0, 1, 2, 3].find(c => !used.includes(c)); return f === undefined ? 0 : f; };
-const playerObj = (slot, ch) => { const o = {name:USER.id, ch, slot}; if (USER.nat) o.nat = String(USER.nat).slice(0, 30); return o; };
+
+/* ---------- Conexion WebSocket ---------- */
+function wsConnect(code, create) {
+  return new Promise((resolve, reject) => {
+    let ws, done = false, to;
+    const fail = msg => { if (done) return; done = true; clearTimeout(to); try { ws.close(); } catch (e) {} reject(new Error(msg)); };
+    to = setTimeout(() => fail('TIEMPO AGOTADO. REVISA TU CONEXION'), 10000);
+    try { ws = new WebSocket(WS_URL + '?room=' + code + (create ? '&create=1' : '')); } catch (e) { fail('SIN CONEXION'); return; }
+    ws.onopen = () => {
+      const hello = {t:'hello', uid:NET.uid, name:USER.id, nat:USER.nat || '', ch:settings.chars[0]};
+      if (create) hello.opts = {map:settings.map, rounds:settings.rounds, sudden:settings.sudden, items:settings.items, bots:false};
+      try { ws.send(JSON.stringify(hello)); } catch (e) {}
+    };
+    ws.onmessage = ev => {
+      let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
+      if (!done) {
+        if (m.t === 'welcome') {
+          done = true; clearTimeout(to); NET.ws = ws; NET.slot = m.slot | 0; NET.host = !!m.host;
+          NET.pingT = setInterval(() => wsSend({t:'ping'}), 15000);
+          resolve(m);
+        } else if (m.t === 'err') fail(m.msg || 'ERROR');
+        return;
+      }
+      if (NET.ws === ws) onWsMsg(m);
+    };
+    ws.onclose = () => { if (!done) fail('SIN CONEXION'); else if (NET.ws === ws) onWsClose(); };
+    ws.onerror = () => {};
+  });
+}
+function onWsMsg(m) {
+  switch (m.t) {
+    case 'lobby':
+      NET.players = m.players || {}; NET.slots = m.slots || []; NET.meta = m.meta;
+      checkLeft();
+      if (!NET.host && m.meta) {
+        if (m.meta.status === 'play' && (!NET.inGame || state === 'menu')) startOnlineClient();
+        else if (m.meta.status === 'lobby' && NET.inGame && state === 'play') endClientGame(m.meta.last);
+      }
+      if (curPanel === 'm-room' && !NET.inGame) renderRoom();
+      break;
+    case 'in': if (NET.host && m.uid && m.d) NET.inputs[m.uid] = m.d; break;
+    case 'state': if (G && G.net === 'client') applyState(m.d); break;
+    case 'map': if (G && G.net === 'client') applyMap(m.d); break;
+    case 'err': rmMsg(m.msg || ''); break;
+    case 'closed': if (!NET.host) { leaveRoom(); showPanel('m-online'); onMsg('LA SALA SE CERRO (EL ANFITRION SE FUE)'); } break;
+  }
+}
+function onWsClose() {
+  if (!NET.room) return;
+  leaveRoom(); showPanel('m-online'); onMsg('SE PERDIO LA CONEXION CON EL SERVIDOR');
+}
 
 /* ---------- Salas ---------- */
 async function createRoom() {
-  if (!netOK()) { onMsg('NECESITAS UNA CUENTA EN LINEA (FIREBASE)'); return; }
+  if (!netOK()) { onMsg('INICIA SESION PARA JUGAR ONLINE'); return; }
   if (NET.busy) return; NET.busy = true; onMsg('CREANDO SALA...');
-  const D = FBD();
   try {
-    let code = null;
-    for (let k = 0; k < 8 && !code; k++) { const c = genCode(); const s = await D.get(dbr('rooms/' + c + '/meta')); if (!s.exists()) code = c; }
-    if (!code) throw new Error('No se pudo generar un codigo');
-    NET.room = code; NET.host = true; NET.uid = USER.uid; NET.meta = null; NET.slot = 0; NET.players = {}; NET.slots = {}; NET.inputs = {};
-    await saveMeta({host:USER.uid, status:'lobby', created:Date.now(), map:settings.map, rounds:settings.rounds, sudden:settings.sudden, items:settings.items, bots:false, last:''});
-    const r = await D.runTransaction(roomRef('slots/0'), cur => (cur === null || cur === USER.uid) ? USER.uid : undefined);
-    if (!r.committed) throw new Error('No se pudo reservar el puesto');
-    await D.set(roomRef('players/' + USER.uid), playerObj(0, pickChar([])));
-    const od = D.onDisconnect(roomRef()); od.remove(); NET.od.push(od);   // si el anfitrion se desconecta, la sala se borra
-    attachRoom(); onMsg(''); rmMsg(''); renderRoom(); showPanel('m-room');
-  } catch (e) { console.warn(e); onMsg(nerr(e)); await leaveRoom(); }
+    NET.uid = myUid();
+    let ok = false, lastErr = null, code = null;
+    for (let k = 0; k < 5 && !ok; k++) {
+      code = genCode();
+      try { await wsConnect(code, true); ok = true; } catch (e) { lastErr = e; if (!/YA EXISTE/.test(e.message)) break; }
+    }
+    if (!ok) throw lastErr || new Error('SIN CONEXION');
+    NET.room = code; NET.meta = null; NET.players = {}; NET.slots = []; NET.inputs = {};
+    onMsg(''); rmMsg(''); renderRoom(); showPanel('m-room');
+  } catch (e) { console.warn(e); onMsg(nerr(e)); leaveRoom(); }
   finally { NET.busy = false; }
 }
 async function joinRoom() {
-  if (!netOK()) { onMsg('NECESITAS UNA CUENTA EN LINEA (FIREBASE)'); return; }
+  if (!netOK()) { onMsg('INICIA SESION PARA JUGAR ONLINE'); return; }
   const code = $('onCode').value.trim().toUpperCase();
   if (!/^[A-Z2-9]{4}$/.test(code)) { onMsg('EL CODIGO TIENE 4 LETRAS O NUMEROS'); return; }
   if (NET.busy) return; NET.busy = true; onMsg('BUSCANDO SALA...');
-  const D = FBD(); let slot = -1;
   try {
-    const ms = await D.get(dbr('rooms/' + code + '/meta'));
-    if (!ms.exists()) { onMsg('SALA NO ENCONTRADA'); return; }
-    const m = ms.val(); if (m.status !== 'lobby') { onMsg('ESA PARTIDA YA EMPEZO'); return; }
-    NET.room = code; NET.host = false; NET.uid = USER.uid; NET.meta = m; NET.players = {}; NET.slots = {}; NET.inputs = {};
-    for (let i = 0; i < 4 && slot < 0; i++) {
-      const r = await D.runTransaction(roomRef('slots/' + i), cur => (cur === null || cur === USER.uid) ? USER.uid : undefined);
-      if (r.committed) slot = i;
-    }
-    if (slot < 0) { onMsg('LA SALA ESTA LLENA'); NET.room = null; return; }
-    NET.slot = slot;
-    const ps = (await D.get(roomRef('players'))).val() || {};
-    for (const p of [roomRef('slots/' + slot), roomRef('players/' + USER.uid), roomRef('in/' + USER.uid)]) { const od = D.onDisconnect(p); od.remove(); NET.od.push(od); }
-    await D.set(roomRef('players/' + USER.uid), playerObj(slot, pickChar(Object.values(ps).map(p => p.ch))));
-    attachRoom(); onMsg(''); rmMsg(''); renderRoom(); showPanel('m-room');
-  } catch (e) { console.warn(e); onMsg(nerr(e)); await leaveRoom(); }
+    NET.uid = myUid();
+    await wsConnect(code, false);
+    NET.room = code; NET.meta = null; NET.players = {}; NET.slots = []; NET.inputs = {};
+    onMsg(''); rmMsg(''); renderRoom(); showPanel('m-room');
+  } catch (e) { console.warn(e); onMsg(nerr(e)); leaveRoom(); }
   finally { NET.busy = false; }
 }
-function attachRoom() {
-  subTo(roomRef('meta'), onMeta);
-  subTo(roomRef('players'), s => { NET.players = s.val() || {}; if (curPanel === 'm-room' && !NET.inGame) renderRoom(); });
-  subTo(roomRef('slots'), s => { NET.slots = s.val() || {}; checkLeft(); if (curPanel === 'm-room' && !NET.inGame) renderRoom(); });
-  if (NET.host) subTo(roomRef('in'), s => { NET.inputs = s.val() || {}; });
-}
-function onMeta(snap) {
-  const m = snap.val();
-  if (!m) { if (NET.room && !NET.host) { leaveRoom(); showPanel('m-online'); onMsg('LA SALA SE CERRO (EL ANFITRION SE FUE)'); } return; }
-  NET.meta = m;
-  if (!NET.host) {
-    if (m.status === 'play' && (!NET.inGame || state === 'menu')) startOnlineClient();
-    else if (m.status === 'lobby' && NET.inGame && state === 'play') endClientGame(m.last);
-  }
-  if (curPanel === 'm-room' && !NET.inGame) renderRoom();
-}
 function checkLeft() { if (!G || G.net !== 'host') return; for (const p of G.players) if (p.remote && NET.slots[p.i] !== p.uid) p.left = true; }
-async function leaveRoom() {
-  const code = NET.room, host = NET.host, slot = NET.slot, uid = NET.uid;
-  NET.subs.concat(NET.gsubs).forEach(u => { try { u(); } catch (e) {} }); NET.subs = []; NET.gsubs = [];
-  NET.od.forEach(o => { try { o.cancel(); } catch (e) {} }); NET.od = [];
+function leaveRoom() {
+  const ws = NET.ws; NET.ws = null;
+  if (NET.pingT) { clearInterval(NET.pingT); NET.pingT = null; }
+  if (ws) { try { if (ws.readyState === 1) ws.send(JSON.stringify({t:'leave'})); ws.close(); } catch (e) {} }
   if (NET.inGame) { G = null; state = 'menu'; }
-  NET.inGame = false; NET.menuOpen = false; NET.room = null; NET.host = false; NET.slot = -1; NET.meta = null; NET.players = {}; NET.slots = {}; NET.inputs = {}; NET.lp = null;
-  if (!code) return;
-  const D = FBD(), P = p => dbr('rooms/' + code + (p ? '/' + p : ''));
-  try {
-    if (host) await D.remove(P());
-    else { await D.remove(P('players/' + uid)); await D.remove(P('in/' + uid)); if (slot >= 0) await D.remove(P('slots/' + slot)); }
-  } catch (e) { console.warn(e); }
+  NET.inGame = false; NET.menuOpen = false; NET.room = null; NET.host = false; NET.slot = -1; NET.meta = null; NET.players = {}; NET.slots = []; NET.inputs = {}; NET.lp = null;
 }
 
 /* ---------- Sala (lobby) ---------- */
@@ -1800,11 +1803,11 @@ async function roomChar(d) {
   if (c === me.ch) return;
   NET.players[NET.uid] = Object.assign({}, me, {ch:c}); renderRoom(); sfx('place');
   const b = document.querySelector('#rmSlots [data-r="' + (d < 0 ? 'l' : 'r') + '"]'); if (b) b.focus();
-  try { await FBD().set(roomRef('players/' + NET.uid), playerObj(me.slot, c)); } catch (e) { rmMsg(nerr(e)); }
+  wsSend({t:'ch', ch:c});
 }
 async function hostOpt(patch, focusId) {
   if (!NET.host || !NET.meta) return;
-  try { await saveMeta(patch); } catch (e) { rmMsg(nerr(e)); }
+  NET.meta = Object.assign({}, NET.meta, patch); wsSend(Object.assign({t:'meta'}, patch));
   renderRoom(); const b = $(focusId); if (b) b.focus();
 }
 let rtick = 0;
@@ -1822,7 +1825,7 @@ async function hostStart() {
   const humans = [0, 1, 2, 3].filter(i => NET.slots[i] && NET.players[NET.slots[i]]).length;
   if (humans < 2 && !NET.meta.bots) { rmMsg('NECESITAS AL MENOS 2 JUGADORES (O ACTIVA LOS BOTS)'); return; }
   ac(); goFull(); rmMsg('');
-  try { await saveMeta({status:'play', last:''}); } catch (e) { rmMsg(nerr(e)); return; }
+  wsSend({t:'start'}); NET.meta = Object.assign({}, NET.meta, {status:'play', last:''});
   startOnlineHost();
 }
 
@@ -1882,7 +1885,8 @@ function remoteUpdate(p) {
 function syncRemoteB() { for (const p of G.players) if (p.remote) { const r = NET.inputs[p.uid]; p.lastB = r ? r.b | 0 : 0; p.lastQ = r ? r.q : undefined; p.tx = p.x; p.ty = p.y; p.accT = G.t; } }
 function hostPublish() {
   if (!G || G.net !== 'host' || ++NET.snapTick % 3) return;      // 20 envios por segundo
-  const D = FBD(), P = {};
+  if (!NET.ws || NET.ws.readyState !== 1 || NET.ws.bufferedAmount > 200000) return;
+  const P = {};
   for (const p of G.players) P[p.i] = [Math.round(p.x), Math.round(p.y), Math.max(0, DIRN.indexOf(p.dir)), p.alive ? 1 : 0, p.ch, p.mv ? 1 : 0, Math.min(999, p.shield | 0),
     Math.min(9999, p.invuln | 0), p.bombs, p.range, p.lvl, p.kick ? 1 : 0, p.wins, p.placeT > 0 ? p.placeT : 0, p.cs | 0, p.active | 0].join(',');
   const bs = G.bombs.map(b => [b.gx, b.gy, b.ox, b.oy, b.vx, b.vy, b.off, b.timer].join(',')).join(';');
@@ -1890,16 +1894,16 @@ function hostPublish() {
   const st = {s:++NET.seq, ph:G.phase, pt:G.phaseT, tx:G.introText || '', sb:G.introSub || null, ct:G.clearText || null, tm:G.time, rd:G.round, tg:G.target, sd:G.sdMsg, gt:G.goT, th:G.themeKey || 'grass',
     p:P, b:bs || null, f:fs || null, ev:NET.evq.length ? NET.evq.join(',') : null};
   NET.evq = [];
-  D.set(roomRef('state'), st).catch(e => console.warn(e));
+  wsSend({t:'state', d:st});
   let g = '', it = '';
   for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) { g += G.grid[y][x]; it += G.items[y][x] ? ITC[G.items[y][x]] : '0'; }
   const key = g + it + st.th;
-  if (key !== NET.lastMap) { NET.lastMap = key; D.set(roomRef('map'), {g, i:it, th:st.th, v:++NET.mv}).catch(e => console.warn(e)); }
+  if (key !== NET.lastMap) { NET.lastMap = key; wsSend({t:'map', d:{g, i:it, th:st.th, v:++NET.mv}}); }
 }
 function onlineEnd(w) {
   const title = '¡' + pnm(w) + ' GANA!', tbl = G.players.map(p => pnm(p) + ': ' + p.wins).join('  ·  ');
   sfx('win'); NET.menuOpen = false;
-  saveMeta({status:'lobby', last:title + '\n' + tbl}).catch(e => console.warn(e));
+  wsSend({t:'end', last:title + '\n' + tbl}); NET.meta = Object.assign({}, NET.meta, {status:'lobby', last:title + '\n' + tbl});
   showResult(title, tbl, [['VOLVER A LA SALA', 'roomback']]);
 }
 
@@ -1919,8 +1923,6 @@ function startOnlineClient() {
   G.phase = 'intro'; G.phaseT = 99999; G.introText = 'CONECTANDO...'; G.mapInit = false;
   NET.lp = null; NET.lastSeq = -1; NET.lastSent = null; NET.menuOpen = false; NET.inGame = true;
   for (let i = 0; i < 4; i++) if (NET.slots[i] && NET.players[NET.slots[i]]) addClientPlayer(i);
-  subTo(roomRef('map'), s => applyMap(s.val()), NET.gsubs);
-  subTo(roomRef('state'), s => applyState(s.val()), NET.gsubs);
   enterPlay();
 }
 function endClientGame(last) {
@@ -2015,7 +2017,7 @@ function sendInput(inp, lp) {
   const cur = [dx, dy, NET.bc, x, y, d, m].join(','), now = performance.now();
   if (cur !== NET.lastSent && ((play && inp.bomb) || now - NET.sentT >= 33)) {
     NET.lastSent = cur; NET.sentT = now;
-    FBD().set(roomRef('in/' + NET.uid), {dx, dy, b:NET.bc, x, y, d, m, q:++NET.q}).catch(e => console.warn(e));
+    wsSend({t:'in', d:{dx, dy, b:NET.bc, x, y, d, m, q:++NET.q}});
   }
 }
 
